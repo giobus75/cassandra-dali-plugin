@@ -27,7 +27,7 @@ def save_images(
     src_dir,
     *,
     img_format="UNCHANGED",
-    keyspace="anime",
+    keyspace="animeface",
     table_suffix="orig",
     split_subdir="",
     target_dir=None,
