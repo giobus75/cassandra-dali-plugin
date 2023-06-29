@@ -23,8 +23,7 @@ import torch.utils.data
 import torch.utils.data.distributed
 
 #import torchvision.models as models
-
-from vanilla_vae import VanillaVAE
+import models 
 
 import numpy as np
 
@@ -46,13 +45,7 @@ world_size = int(os.getenv("WORLD_SIZE", default=1))
 
 
 def parse():
-    model_names = sorted(
-        name
-        for name in models.__dict__
-        if name.islower()
-        and not name.startswith("__")
-        and callable(models.__dict__[name])
-    )
+    model_names = [name for name in models.vae_models]
 
     parser = argparse.ArgumentParser(description="PyTorch ImageNet Training")
     parser.add_argument(
@@ -96,7 +89,7 @@ def parse():
         "--arch",
         "-a",
         metavar="ARCH",
-        default="resnet18",
+        default="VanillaVAE",
         choices=model_names,
         help="model architecture: " + " | ".join(model_names) + " (default: resnet18)",
     )
@@ -200,7 +193,6 @@ def create_dali_pipeline(
     table_suffix,
     id_col,
     label_type,
-    label_col,
     data_col,
     bs,
     crop,
@@ -218,7 +210,6 @@ def create_dali_pipeline(
         table_suffix=table_suffix,
         id_col=id_col,
         label_type=label_type,
-        label_col=label_col,
         data_col=data_col,
         batch_size=bs,
         prefetch_buffers=prefetch_buffers,
@@ -288,12 +279,10 @@ def read_split_file(split_fn):
     id_col = data["id_col"]
     data_col = data["data_col"]  # Name of the table column with actual data
     label_type = data["label_type"]
-    label_col = data["label_col"]  # Name of the table column with the outcome label
     row_keys = data["row_keys"]  # Numpy array of UUIDs
     split = data[
         "split"
     ]  # List of arrays. Each arrays indexes the row_keys array for each split.
-    num_classes = data["num_classes"]
 
     return (
         keyspace,
@@ -301,10 +290,8 @@ def read_split_file(split_fn):
         id_col,
         data_col,
         label_type,
-        label_col,
         row_keys,
         split,
-        num_classes,
     )
 
 
@@ -340,8 +327,8 @@ def compute_split_index(split, train_index, val_index, crossval_index, exclude_i
 
 
 def main():
-    global best_prec1, args
-    best_prec1 = 0
+    global best_loss, args
+    best_loss = np.inf
     args = parse()
 
     ## Read split file to get data for training
@@ -351,10 +338,8 @@ def main():
         id_col,
         data_col,
         label_type,
-        label_col,
         row_keys,
         split,
-        num_classes,
     ) = read_split_file(args.split_fn)
 
     # Get split indexes
@@ -403,8 +388,9 @@ def main():
     assert torch.backends.cudnn.enabled, "Amp requires cudnn backend to be enabled."
 
     # create vanilla_vae model
-    model_config = {'in_channels': 3, 'latent_dim': 128}
-    model = vae_models[args.arch](**model_config)
+    patch_size = 64
+    model_config = {'in_channels': 3, 'latent_dim': 128, 'patch_size': patch_size}
+    model = models.vae_models[args.arch](**model_config)
 
     if args.sync_bn:
         print("using apex synced BN")
@@ -477,9 +463,6 @@ def main():
 
         resume()
 
-    crop_size = 224
-    val_size = 256
-
     # train pipe
     train_uuids = row_keys[split[train_index]]
 
@@ -488,15 +471,14 @@ def main():
         table_suffix=table_suffix,
         id_col=id_col,
         label_type=label_type,
-        label_col=label_col,
         data_col=data_col,
         batch_size=args.batch_size,
         bs=args.batch_size,
         num_threads=args.workers,
         device_id=local_rank,
         seed=12 + local_rank,  # global_rank?
-        crop=crop_size,
-        size=val_size,
+        crop=patch_size,
+        size=patch_size,
         dali_cpu=args.dali_cpu,
         is_training=True,
     )
@@ -524,15 +506,14 @@ def main():
         table_suffix=table_suffix,
         id_col=id_col,
         label_type=label_type,
-        label_col=label_col,
         data_col=data_col,
         batch_size=args.batch_size,
         bs=args.batch_size,
         num_threads=args.workers,
         device_id=local_rank,
         seed=12 + local_rank,  # global_rank?
-        crop=crop_size,
-        size=val_size,
+        crop=patch_size,
+        size=patch_size,
         dali_cpu=args.dali_cpu,
         is_training=False,
     )
@@ -576,13 +557,11 @@ def main():
             val_loader._pipes[0].feed_input("Reader[0]", u)
 
         # train for one epoch
-        avg_train_time = train(train_loader, model, criterion, optimizer, epoch)
+        avg_train_time = train(train_loader, model, optimizer, epoch)
         total_time.update(avg_train_time)
-        if args.test:
-            break
 
         # evaluate on validation set
-        val_loss = validate(val_loader, model, criterion)
+        val_loss = validate(val_loader, model)
 
         # remember best prec@1 and save checkpoint
         if local_rank == 0:  # global_rank?
@@ -600,10 +579,8 @@ def main():
             )
             if epoch == args.epochs - 1:
                 print(
-                    "##Loss {0}\n"
-                    "##Top-5 {1}\n"
-                    "##Perf  {2}".format(
-                        val_loss, args.total_batch_size / total_time.avg
+                    "##Loss {0}\n".format(
+                        val_loss
                     )
                 )
 
@@ -683,7 +660,7 @@ def train(train_loader, model, optimizer, epoch):
     return batch_time.avg
 
 
-def validate(val_loader, model, criterion):
+def validate(val_loader, model):
     batch_time = AverageMeter()
     losses = AverageMeter()
 

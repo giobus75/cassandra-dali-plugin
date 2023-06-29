@@ -3,6 +3,7 @@ from models import BaseVAE
 from torch import nn
 from torch.nn import functional as F
 from .types_ import *
+import numpy as np
 
 
 class VanillaVAE(BaseVAE):
@@ -11,6 +12,7 @@ class VanillaVAE(BaseVAE):
     def __init__(self,
                  in_channels: int,
                  latent_dim: int,
+                 patch_size: int,
                  hidden_dims: List = None,
                  **kwargs) -> None:
         super(VanillaVAE, self).__init__()
@@ -33,14 +35,16 @@ class VanillaVAE(BaseVAE):
             in_channels = h_dim
 
         self.encoder = nn.Sequential(*modules)
-        self.fc_mu = nn.Linear(hidden_dims[-1]*4, latent_dim)
-        self.fc_var = nn.Linear(hidden_dims[-1]*4, latent_dim)
+        
+        last_feature_map_HW = patch_size // 2**(len(hidden_dims))
+        self.fc_mu = nn.Linear(hidden_dims[-1]*last_feature_map_HW*last_feature_map_HW, latent_dim)
+        self.fc_var = nn.Linear(hidden_dims[-1]*last_feature_map_HW*last_feature_map_HW, latent_dim)
 
 
         # Build Decoder
         modules = []
 
-        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1] * 4)
+        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1] * last_feature_map_HW*last_feature_map_HW)
 
         hidden_dims.reverse()
 
