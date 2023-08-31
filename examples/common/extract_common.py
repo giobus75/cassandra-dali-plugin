@@ -64,19 +64,34 @@ def get_data(img_format="JPEG", img_size=def_size, crop=False):
 def get_jobs(src_dir, splits=["train", "val"]):
     jobs = []
     labels = dict()
-
     ln = 0  # next-label number
-    for or_split in splits:
-        sp_dir = os.path.join(src_dir, or_split)
-        subdirs = [d.name for d in os.scandir(sp_dir) if d.is_dir()]
+
+    if splits:
+        for or_split in splits:
+            sp_dir = os.path.join(src_dir, or_split)
+            subdirs = [d.name for d in os.scandir(sp_dir) if d.is_dir()]
+            for or_label in subdirs:
+                # if label is new, assign a new number
+                if or_label not in labels:
+                    labels[or_label] = ln
+                    ln += 1
+                label = labels[or_label]
+                partition_items = (or_split, or_label)
+                cur_dir = os.path.join(sp_dir, or_label)
+                fns = os.listdir(cur_dir)
+                for fn in fns:
+                    path = os.path.join(cur_dir, fn)
+                    jobs.append((path, label, partition_items))
+    else:
+        subdirs = [d.name for d in os.scandir(src_dir) if d.is_dir()]
         for or_label in subdirs:
             # if label is new, assign a new number
             if or_label not in labels:
                 labels[or_label] = ln
                 ln += 1
             label = labels[or_label]
-            partition_items = (or_split, or_label)
-            cur_dir = os.path.join(sp_dir, or_label)
+            partition_items = (or_label)
+            cur_dir = os.path.join(src_dir, or_label)
             fns = os.listdir(cur_dir)
             for fn in fns:
                 path = os.path.join(cur_dir, fn)
