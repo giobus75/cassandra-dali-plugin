@@ -391,6 +391,7 @@ def main():
     patch_size = 64
     model_config = {'in_channels': 3, 'latent_dim': 128, 'patch_size': patch_size}
     model = models.vae_models[args.arch](**model_config)
+    criterion = model.loss_function
 
     if args.sync_bn:
         print("using apex synced BN")
@@ -557,11 +558,11 @@ def main():
             val_loader._pipes[0].feed_input("Reader[0]", u)
 
         # train for one epoch
-        avg_train_time = train(train_loader, model, optimizer, epoch)
+        avg_train_time = train(train_loader, model, optimizer, criterion, epoch)
         total_time.update(avg_train_time)
 
         # evaluate on validation set
-        val_loss = validate(val_loader, model)
+        val_loss = validate(val_loader, model, criterion)
 
         # remember best prec@1 and save checkpoint
         if local_rank == 0:  # global_rank?
@@ -588,9 +589,11 @@ def main():
         val_loader.reset()
 
 
-def train(train_loader, model, optimizer, epoch):
+def train(train_loader, model, optimizer, criterion, epoch):
     batch_time = AverageMeter()
     losses = AverageMeter()
+    rec_losses = AverageMeter()
+    kld_losses = AverageMeter()
 
     # switch to train mode
     model.train()
@@ -603,7 +606,7 @@ def train(train_loader, model, optimizer, epoch):
 
         # compute output
         output = model(input)
-        loss = model.loss_function(*output,
+        loss = criterion(*output,
                                    M_N = 0.00025 #KL Divergence loss weight,
                                    )
 
@@ -631,36 +634,35 @@ def train(train_loader, model, optimizer, epoch):
             # Average loss and accuracy across processes for logging
             if args.distributed:
                 reduced_loss = reduce_tensor(loss.data)
+                reduced_rec_loss = reduce_tensor(rec_loss.data)
+                reduced_kld_loss = reduce_tensor(kld_loss.data)
             else:
                 reduced_loss = loss.data
+                reduced_rec_loss = rec_loss.data
+                reduced_kld_loss = kld_loss.data
 
             # to_python_float incurs a host<->device sync
             losses.update(to_python_float(reduced_loss), input.size(0))
+            rec_losses.update(to_python_float(reduced_rec_loss), input.size(0))
+            kld_losses.update(to_python_float(reduced_kld_loss), input.size(0))
             torch.cuda.synchronize()
             
             batch_time.update((time.time() - end) / args.print_freq)
             end = time.time()
 
             if local_rank == 0:  # global_rank?
+                speed_val = world_size * args.batch_size / batch_time.val
+                speed_avg = world_size * args.batch_size / batch_time.avg
                 print(
-                    "Epoch: [{0}][{1}/{2}]\t"
-                    "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
-                    "Speed {3:.3f} ({4:.3f})\t"
-                    "Loss {loss.val:.10f} ({loss.avg:.4f})".format(
-                        epoch,
-                        i,
-                        train_loader_len,
-                        world_size * args.batch_size / batch_time.val,
-                        world_size * args.batch_size / batch_time.avg,
-                        batch_time=batch_time,
-                        loss=losses,
+                    f"Epoch: [{epoch}][{i}/{train_loader_len}]\tTime {batch_time.val:.3f} ({batch_time.avg:.3f}) - Speed {speed_val:.3f} ({speed_avg:.3f})\t \
+                    Rec Loss {rec_losses.val:.4f} ({rec_losses.avg:.4f}) - KL Div {kld_losses.val:.4f} ({kld_losses.avg:.4f}) - Loss {losses.val:.4f} ({losses.avg:.4f})"
                     )
-                )
+                
 
     return batch_time.avg
 
 
-def validate(val_loader, model):
+def validate(val_loader, model, criterion):
     batch_time = AverageMeter()
     losses = AverageMeter()
 
@@ -677,7 +679,7 @@ def validate(val_loader, model):
         # compute output
         with torch.no_grad():
             output = model(input)
-            loss = model.loss_function(*output,
+            loss = criterion(*output,
                                    M_N = 1.0 #KL Divergence loss weight,
                                    )
         rec_loss = loss['Reconstruction_Loss']
